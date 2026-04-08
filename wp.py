@@ -8,7 +8,7 @@ from pyrogram import Client, filters, types
 from pyrogram.errors import MessageNotModified
 from pymongo import MongoClient
 from neonize.client import NewClient
-from neonize.events import MessageEv
+from neonize.events import MessageEv, ConnectedEv, LoggedOutEv, ReceiptEv
 
 API_ID = 21705136
 API_HASH = "78730e89d196e160b0f1992018c6cb19"
@@ -45,7 +45,6 @@ if configs_col.count_documents({}) == 0:
     ])
 
 today_str = time.strftime('%Y-%m-%d')
-
 if not stats_col.find_one({"date": today_str}):
     stats_col.insert_one(
         {
@@ -71,39 +70,42 @@ app = Client(
 
 user_states = {}
 active_clients = {}
+live_qr_strings = {}
 
 def get_main_keyboard():
     status_doc = settings_col.find_one({"key": "bot_status"})
     current_status = status_doc.get("status", "started") if status_doc else "started"
     
     if current_status == "started":
-        toggle_text = "Stop Auto-Reply"
+        toggle_text = "⏸️ Stop Auto-Reply"
     else:
-        toggle_text = "Start Auto-Reply"
+        toggle_text = "▶️ Start Auto-Reply"
         
     return types.InlineKeyboardMarkup(
         [
             [
                 types.InlineKeyboardButton(
-                    "Add Account",
+                    "📱 Add WhatsApp Account",
                     callback_data="add_wa"
                 )
             ],
             [
                 types.InlineKeyboardButton(
-                    "Manage Accounts",
+                    "⚙️ Manage Accounts",
                     callback_data="manage_accs"
+                ),
+                types.InlineKeyboardButton(
+                    "📊 System Stats",
+                    callback_data="live_stats"
                 )
             ],
             [
                 types.InlineKeyboardButton(
-                    "Configure Messages",
+                    "📝 Configure Sequence",
                     callback_data="config_msgs"
-                )
-            ],
-            [
+                ),
                 types.InlineKeyboardButton(
-                    "View Messages",
+                    "👁️ View Messages",
                     callback_data="view_msgs"
                 )
             ],
@@ -111,12 +113,6 @@ def get_main_keyboard():
                 types.InlineKeyboardButton(
                     toggle_text,
                     callback_data="toggle_bot"
-                )
-            ],
-            [
-                types.InlineKeyboardButton(
-                    "System Stats",
-                    callback_data="live_stats"
                 )
             ]
         ]
@@ -127,13 +123,19 @@ def get_add_wa_keyboard():
         [
             [
                 types.InlineKeyboardButton(
-                    "Login via Pairing Code",
+                    "🔑 Login via Pairing Code",
                     callback_data="add_wa_pair"
                 )
             ],
             [
                 types.InlineKeyboardButton(
-                    "Cancel",
+                    "📷 Login via QR Code",
+                    callback_data="add_wa_qr"
+                )
+            ],
+            [
+                types.InlineKeyboardButton(
+                    "❌ Cancel",
                     callback_data="back_main"
                 )
             ]
@@ -145,23 +147,23 @@ def get_config_msgs_keyboard():
         [
             [
                 types.InlineKeyboardButton(
-                    "Set Msg 1",
+                    "Set Message 1",
                     callback_data="set_msg_1"
                 ),
                 types.InlineKeyboardButton(
-                    "Set Msg 2",
+                    "Set Message 2",
                     callback_data="set_msg_2"
                 )
             ],
             [
                 types.InlineKeyboardButton(
-                    "Set Msg 3",
+                    "Set Message 3",
                     callback_data="set_msg_3"
                 )
             ],
             [
                 types.InlineKeyboardButton(
-                    "Back",
+                    "🔙 Return to Menu",
                     callback_data="back_main"
                 )
             ]
@@ -171,8 +173,8 @@ def get_config_msgs_keyboard():
 def get_accounts_keyboard(accounts_list):
     buttons = []
     for index, account in enumerate(accounts_list, 1):
-        status_icon = "Active" if account["is_active"] else "Inactive"
-        display_text = f"Sess.{index} | {status_icon} | {account['number']}"
+        status_icon = "🟢" if account["is_active"] else "🔴"
+        display_text = f"Slot {index} | {status_icon} | {account['number']}"
         buttons.append(
             [
                 types.InlineKeyboardButton(
@@ -180,7 +182,7 @@ def get_accounts_keyboard(accounts_list):
                     callback_data=f"ignore_{account['id']}"
                 ),
                 types.InlineKeyboardButton(
-                    "Remove",
+                    "🗑️ Logout",
                     callback_data=f"del_acc_{account['id']}"
                 )
             ]
@@ -188,7 +190,7 @@ def get_accounts_keyboard(accounts_list):
     buttons.append(
         [
             types.InlineKeyboardButton(
-                "Back",
+                "🔙 Return to Menu",
                 callback_data="back_main"
             )
         ]
@@ -209,7 +211,7 @@ def get_stats_keyboard(stats_list):
     buttons.append(
         [
             types.InlineKeyboardButton(
-                "Back",
+                "🔙 Return to Menu",
                 callback_data="back_main"
             )
         ]
@@ -223,41 +225,55 @@ def find_free_session_id():
     return None
 
 async def verify_login_loop(client_instance, session_id, phone_number, user_id, active_msg_id):
-    for _ in range(150):
+    is_authenticated = False
+    
+    for _ in range(120):
         await asyncio.sleep(2)
         try:
-            is_logged = False
-            
             if hasattr(client_instance, 'is_logged_in'):
-                val = getattr(client_instance, 'is_logged_in')
-                is_logged = val() if callable(val) else val
-            elif hasattr(client_instance, 'IsLoggedIn'):
-                val = getattr(client_instance, 'IsLoggedIn')
-                is_logged = val() if callable(val) else val
+                is_authenticated = client_instance.is_logged_in
             else:
-                db_path = f"session_{session_id}.db"
-                if os.path.exists(db_path):
-                    if os.path.getsize(db_path) > 90000:
-                        is_logged = True
+                try:
+                    me_data = client_instance.get_me()
+                    if me_data and hasattr(me_data, 'JID'):
+                        is_authenticated = True
+                except Exception:
+                    is_authenticated = False
 
-            if is_logged:
+            if is_authenticated:
+                actual_number = phone_number
+                if not actual_number:
+                    try:
+                        me_obj = client_instance.get_me()
+                        raw_jid = str(me_obj.JID)
+                        actual_number = raw_jid.split('@')[0]
+                    except Exception:
+                        actual_number = "QR_Authenticated"
+
                 existing_entry = sessions_col.find_one({"session_id": session_id})
                 if not existing_entry:
                     sessions_col.insert_one(
                         {
                             "session_id": session_id,
-                            "number": phone_number or "QR_Linked",
+                            "number": actual_number,
                             "is_active": True
                         }
                     )
+                    
                     try:
                         await app.delete_messages(user_id, active_msg_id)
                     except Exception:
                         pass
+                        
                     try:
+                        success_msg = f"✅ **Authentication Successful!**\n\n"
+                        success_msg += f"Session ID: `{session_id}`\n"
+                        success_msg += f"Connected Number: `{actual_number}`\n\n"
+                        success_msg += "Your account is now fully integrated with MongoDB Atlas."
+                        
                         await app.send_message(
                             chat_id=user_id,
-                            text=f"Authentication Successful\n\nSession ID {session_id} has connected to WhatsApp.",
+                            text=success_msg,
                             reply_markup=get_main_keyboard()
                         )
                     except Exception:
@@ -266,12 +282,56 @@ async def verify_login_loop(client_instance, session_id, phone_number, user_id, 
         except Exception:
             pass
 
-async def auto_responder_task(session_id, chat_jid):
+async def render_qr_and_send(session_id, user_id, active_msg_id):
+    for _ in range(30):
+        await asyncio.sleep(1)
+        qr_string = live_qr_strings.get(session_id)
+        if qr_string:
+            qr = qrcode.QRCode(version=1, box_size=10, border=5)
+            qr.add_data(qr_string)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            
+            bio = io.BytesIO()
+            bio.name = f'qr_{session_id}.png'
+            img.save(bio, 'PNG')
+            bio.seek(0)
+            
+            try:
+                await app.delete_messages(user_id, active_msg_id)
+            except Exception:
+                pass
+                
+            try:
+                sent_photo = await app.send_photo(
+                    chat_id=user_id,
+                    photo=bio,
+                    caption=f"✅ **Dynamic QR Generated**\n\nSlot ID: `{session_id}`\n\nPlease scan this QR code within 30 seconds using your WhatsApp Linked Devices option.",
+                    reply_markup=types.InlineKeyboardMarkup(
+                        [
+                            [
+                                types.InlineKeyboardButton(
+                                    "❌ Cancel Request",
+                                    callback_data="back_main"
+                                )
+                            ]
+                        ]
+                    )
+                )
+                
+                user_states[user_id]["active_msg_id"] = sent_photo.id
+                client_instance = active_clients.get(session_id)
+                if client_instance:
+                    asyncio.create_task(verify_login_loop(client_instance, session_id, None, user_id, sent_photo.id))
+            except Exception:
+                pass
+            break
+
+async def auto_responder_task(session_id, chat_jid_str, client):
     try:
-        user_number = getattr(chat_jid, 'User', "")
-        server_type = getattr(chat_jid, 'Server', "")
+        user_number = chat_jid_str.split('@')[0]
         
-        if server_type in ["g.us", "lid"] or not user_number:
+        if "g.us" in chat_jid_str or "lid" in chat_jid_str or not user_number.isdigit():
             return
             
         status_doc = settings_col.find_one({"key": "bot_status"})
@@ -284,27 +344,51 @@ async def auto_responder_task(session_id, chat_jid):
             
         contacts_col.insert_one({"session_id": session_id, "number": user_number})
         
-        client = active_clients.get(session_id)
-        if not client:
+        db_messages = list(configs_col.find().sort("step", 1))
+        if not db_messages:
             return
 
-        db_messages = list(configs_col.find().sort("step", 1))
-        
-        current_today_str = time.strftime('%Y-%m-%d')
-        stats_col.update_one(
-            {"date": current_today_str},
-            {"$inc": {"total_msgs_today": len(db_messages)}},
-            upsert=True
-        )
-
         for msg in db_messages:
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
+            
             try:
-                client.send_message(chat_jid, msg["text"])
+                if msg["type"] == "text":
+                    client.send_presence("composing", chat_jid_str)
+                else:
+                    client.send_presence("recording", chat_jid_str)
             except Exception:
                 pass
+
             await asyncio.sleep(1.5)
             
+            msg_sent_success = False
+            
+            try:
+                if msg["type"] == "text":
+                    client.send_message(chat_jid_str, msg["text"])
+                    msg_sent_success = True
+                elif msg["type"] == "photo":
+                    pass
+                elif msg["type"] == "video":
+                    pass
+                elif msg["type"] == "document":
+                    pass
+            except Exception:
+                pass
+                
+            if msg_sent_success:
+                current_today_str = time.strftime('%Y-%m-%d')
+                stats_col.update_one(
+                    {"date": current_today_str},
+                    {"$inc": {"total_msgs_today": 1}},
+                    upsert=True
+                )
+                
+            try:
+                client.send_presence("paused", chat_jid_str)
+            except Exception:
+                pass
+                
     except Exception:
         pass
 
@@ -314,20 +398,36 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
     user_states[user_id]["session_id"] = session_id
     user_states[user_id]["phone_number"] = phone_number
     
-    def message_handler(client, message: MessageEv):
+    def event_handler(client, event):
         try:
-            msg_info = message.Info
-            msg_source = msg_info.MessageSource
-            if msg_source.IsFromMe:
-                return
-            chat_jid = msg_source.Chat
-            asyncio.run_coroutine_threadsafe(auto_responder_task(session_id, chat_jid), current_loop)
+            if isinstance(event, MessageEv):
+                msg_info = event.Info
+                msg_source = msg_info.MessageSource
+                if msg_source.IsFromMe:
+                    return
+                chat_jid = str(msg_source.Chat)
+                asyncio.run_coroutine_threadsafe(auto_responder_task(session_id, chat_jid, client), current_loop)
+            
+            elif isinstance(event, LoggedOutEv):
+                try:
+                    sessions_col.delete_one({"session_id": session_id})
+                    contacts_col.delete_many({"session_id": session_id})
+                    if session_id in active_clients:
+                        del active_clients[session_id]
+                except Exception:
+                    pass
+                    
+            elif hasattr(event, "QR"):
+                qr_string = getattr(event, "QR")
+                if qr_string:
+                    live_qr_strings[session_id] = qr_string
+                    
         except Exception:
             pass
 
     db_path = f"session_{session_id}.db"
     client = NewClient(db_path)
-    client.event(MessageEv)(message_handler)
+    client.add_event_handler(event_handler)
     active_clients[session_id] = client
 
     def run_client_connection():
@@ -338,13 +438,13 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
 
     threading.Thread(target=run_client_connection, daemon=True).start()
 
-    await asyncio.sleep(4)
+    await asyncio.sleep(3)
 
     cancel_keyboard = types.InlineKeyboardMarkup(
         [
             [
                 types.InlineKeyboardButton(
-                    "Cancel",
+                    "❌ Cancel Process",
                     callback_data="back_main"
                 )
             ]
@@ -354,17 +454,17 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
     if phone_number:
         try:
             try:
-                pairing_code = client.PairPhone(phone_number, True)
+                pairing_code = client.pair_phone(phone_number)
             except Exception:
                 try:
-                    pairing_code = client.pair_phone(phone_number)
+                    pairing_code = client.PairPhone(phone_number, True)
                 except Exception:
                     pairing_code = "UNAVAILABLE"
             
-            if pairing_code == "UNAVAILABLE":
+            if pairing_code == "UNAVAILABLE" or not pairing_code:
                 try:
                     sent_msg = await callback_msg.edit_text(
-                        "Connection Error\nFailed to connect with WhatsApp servers. Please ensure VPS internet is active and try again.",
+                        "❌ **Connection Error**\nFailed to fetch pairing code from WhatsApp. Ensure the number is correct and try again.",
                         reply_markup=cancel_keyboard
                     )
                     user_states[user_id]["active_msg_id"] = sent_msg.id
@@ -374,9 +474,9 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
             
             user_states[user_id]["state"] = "awaiting_login_confirmation"
             
-            success_text = f"Account Slot ID: {session_id} Initialized\n\n"
-            success_text += f"Your Pairing Code is: {pairing_code}\n\n"
-            success_text += f"Please open WhatsApp > Linked Devices > Link with Phone Number and enter this code."
+            success_text = f"✅ **Account Slot ID: {session_id} Initialized.**\n\n"
+            success_text += f"🔢 Your Pairing Code is: `{pairing_code}`\n\n"
+            success_text += f"Open WhatsApp > Linked Devices > Link with Phone Number and enter this exact code."
             
             try:
                 sent_msg = await callback_msg.edit_text(
@@ -400,24 +500,24 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
                 pass
             return
     else:
-        qr_text = "QR Mode Active\n\n"
-        qr_text += "QR code is rendered in your VPS Terminal Console.\n\n"
-        qr_text += "Please open your SSH terminal to view and scan."
-        
         try:
             sent_msg = await callback_msg.edit_text(
-                qr_text,
+                "⏳ **Intercepting QR Code from WhatsApp Servers...**\nPlease wait up to 10 seconds.",
                 reply_markup=cancel_keyboard
             )
             user_states[user_id]["active_msg_id"] = sent_msg.id
         except MessageNotModified:
             pass
             
-        asyncio.create_task(verify_login_loop(client, session_id, None, user_id, sent_msg.id))
+        asyncio.create_task(render_qr_and_send(session_id, user_id, sent_msg.id))
 
 async def logout_client(session_id):
     client = active_clients.get(session_id)
     if client:
+        try:
+            client.logout()
+        except Exception:
+            pass
         del active_clients[session_id]
         
     db_file_path = f"session_{session_id}.db"
@@ -453,9 +553,9 @@ def count_accounts():
     
     stats_dictionary = {
         "Total Messages Sent Today": total_msgs_sent,
-        "Active Live Engine Instances": live_count,
-        "Total Saved Database Accounts": total_saved_sessions,
-        "Accounts Marked as Connected": active_in_atlas
+        "Active Runtime Engines": live_count,
+        "Database Linked Accounts": total_saved_sessions,
+        "Cloud Connected Status": active_in_atlas
     }
     return stats_dictionary
 
@@ -467,7 +567,7 @@ def list_accounts_conceptual():
         accounts_list.append(
             {
                 "id": sess["session_id"],
-                "number": sess.get("number", "Unknown"),
+                "number": sess.get("number", "Unknown Format"),
                 "is_active": sess.get("is_active", False)
             }
         )
@@ -477,15 +577,15 @@ def list_accounts_conceptual():
 @app.on_message(~filters.user(ADMIN_ID))
 async def not_admin(client, message):
     try:
-        await message.reply("Access denied. Admin only.")
+        await message.reply("Access Denied. You are not authorized.")
     except Exception:
         pass
     message.stop_propagation()
 
 @app.on_message(filters.command("start") & filters.user(ADMIN_ID))
 async def start(client, message):
-    welcome_text = "WhatsApp Multi-Device Auto-Responder Panel\n\n"
-    welcome_text += "Select an option below to manage accounts and configurations."
+    welcome_text = "🤖 **WhatsApp Cloud Automation Engine**\n\n"
+    welcome_text += "Welcome to your centralized Multi-Device control panel. Choose an operation below to proceed."
     
     if ADMIN_ID not in user_states:
         user_states[ADMIN_ID] = {}
@@ -514,7 +614,7 @@ async def handle_callbacks(client, callback_query):
         user_states[user_id] = {}
         try:
             await callback_query.message.edit_text(
-                "WhatsApp Bot Panel Main Menu:",
+                "🤖 **WhatsApp Cloud Automation Engine**\n\nSelect an operation below:",
                 reply_markup=get_main_keyboard()
             )
         except MessageNotModified:
@@ -532,7 +632,7 @@ async def handle_callbacks(client, callback_query):
         user_states[user_id]["session_id"] = new_session_id
         try:
             await callback_query.message.edit_text(
-                f"Allocating slot ID {new_session_id}. Select login method:",
+                f"**Allocating Instance Slot: {new_session_id}**\n\nSelect your preferred authentication method:",
                 reply_markup=get_add_wa_keyboard()
             )
         except MessageNotModified:
@@ -542,8 +642,8 @@ async def handle_callbacks(client, callback_query):
         pending_session_id = user_states[user_id].get("session_id")
         if pending_session_id:
             try:
-                await callback_query.answer("Starting terminal QR service", show_alert=False)
-                await callback_query.message.edit_text("Processing connection, please wait...")
+                await callback_query.answer("Connecting to WA Servers...", show_alert=False)
+                await callback_query.message.edit_text("⏳ **Establishing Engine Connection...**")
             except Exception:
                 pass
             await initialize_wa_client(pending_session_id, None, callback_query.message, user_id)
@@ -554,12 +654,12 @@ async def handle_callbacks(client, callback_query):
             user_states[user_id]["state"] = "awaiting_pair_number"
             try:
                 await callback_query.message.edit_text(
-                    "Please enter the target WhatsApp number including country code.\nDo not include + or spaces.",
+                    "📱 **Enter Target WhatsApp Number**\n\nInclude the country code (e.g., 919876543210).\n⚠️ **Strict Rule: Do not include '+' or spaces.**",
                     reply_markup=types.InlineKeyboardMarkup(
                         [
                             [
                                 types.InlineKeyboardButton(
-                                    "Cancel",
+                                    "❌ Cancel Process",
                                     callback_data="back_main"
                                 )
                             ]
@@ -573,7 +673,7 @@ async def handle_callbacks(client, callback_query):
         current_accounts_list = list_accounts_conceptual()
         try:
             await callback_query.message.edit_text(
-                "Directory of Managed WhatsApp Accounts:",
+                "📋 **Active Sessions Directory**\nManage connected accounts synchronized with Atlas.",
                 reply_markup=get_accounts_keyboard(current_accounts_list)
             )
         except MessageNotModified:
@@ -585,13 +685,13 @@ async def handle_callbacks(client, callback_query):
         updated_accounts_list = list_accounts_conceptual()
         
         try:
-            await callback_query.answer(f"Session {target_session_id} removed.", show_alert=True)
+            await callback_query.answer(f"Session {target_session_id} purged successfully.", show_alert=True)
         except Exception:
             pass
         
         try:
             await callback_query.message.edit_text(
-                f"Directory Updated:",
+                f"📋 **Active Sessions Directory**\nDirectory updated.",
                 reply_markup=get_accounts_keyboard(updated_accounts_list)
             )
         except MessageNotModified:
@@ -601,7 +701,7 @@ async def handle_callbacks(client, callback_query):
         current_stats_list = count_accounts()
         try:
             await callback_query.message.edit_text(
-                "System Analytics:",
+                "📊 **System Diagnostics & Metrics**",
                 reply_markup=get_stats_keyboard(current_stats_list)
             )
         except MessageNotModified:
@@ -610,7 +710,7 @@ async def handle_callbacks(client, callback_query):
     elif callback_data_string == "config_msgs":
         try:
             await callback_query.message.edit_text(
-                "Configure Sequence Messages:",
+                "⚙️ **Sequence Configuration Protocol**\nChoose a step to modify the response.",
                 reply_markup=get_config_msgs_keyboard()
             )
         except MessageNotModified:
@@ -620,20 +720,20 @@ async def handle_callbacks(client, callback_query):
         all_db_messages = list(configs_col.find().sort("step", 1))
         config_status_display = ""
         for msg_item in all_db_messages:
-            config_status_display += f"Step {msg_item['step']} : "
+            config_status_display += f"**Step {msg_item['step']}** ➞ "
             if msg_item.get('type') == 'text':
-                config_status_display += f"Text -> {msg_item.get('text', 'Empty')}\n\n"
+                config_status_display += f"Text: `{msg_item.get('text', 'Empty')}`\n\n"
             else:
-                config_status_display += f"Media -> Caption: {msg_item.get('text', 'No Caption')}\n\n"
+                config_status_display += f"Media Document ➞ Caption: `{msg_item.get('text', 'No Caption')}`\n\n"
                 
         try:
             await callback_query.message.edit_text(
-                f"Currently Active Configured Sequence:\n\n{config_status_display}",
+                f"👁️ **Currently Active Sequence:**\n\n{config_status_display}",
                 reply_markup=types.InlineKeyboardMarkup(
                     [
                         [
                             types.InlineKeyboardButton(
-                                "Back",
+                                "🔙 Return to Menu",
                                 callback_data="back_main"
                             )
                         ]
@@ -650,8 +750,10 @@ async def handle_callbacks(client, callback_query):
         new_status = "stopped" if current_status == "started" else "started"
         settings_col.update_one({"key": "bot_status"}, {"$set": {"status": new_status}}, upsert=True)
         
+        display_status = "ACTIVATED" if new_status == "started" else "PAUSED"
+        
         try:
-            await callback_query.answer(f"Bot auto-reply is now {new_status}.", show_alert=True)
+            await callback_query.answer(f"System State: Auto-Responder is {display_status}.", show_alert=True)
         except Exception:
             pass
             
@@ -666,7 +768,7 @@ async def handle_callbacks(client, callback_query):
         user_states[user_id]["step"] = target_step_number
         try:
             await callback_query.message.edit_text(
-                f"Send the new content payload (Text, Photo, Video, Document) for Message {target_step_number}."
+                f"📥 **Data Intake Module**\n\nPlease transmit the new content payload (Text, Photo, Video, or Document) to be assigned to **Sequence Step {target_step_number}**."
             )
         except MessageNotModified:
             pass
@@ -686,12 +788,11 @@ async def handle_text_inputs(client, message):
     
     if current_user_state == "awaiting_pair_number":
         active_session_id = user_states[user_id].get("session_id")
-        
         clean_number = "".join(filter(str.isdigit, input_text_content))
         
         try:
             processing_message = await message.reply(
-                f"Establishing secure connection to WhatsApp servers..."
+                f"⏳ Initializing cryptographic handshake for Slot ID {active_session_id}..."
             )
         except Exception:
             return
@@ -711,7 +812,7 @@ async def handle_text_inputs(client, message):
             upsert=True
         )
         try:
-            await message.reply(f"Text Configuration for Step {target_step_id} synchronized.")
+            await message.reply(f"✅ Text payload successfully integrated into Step {target_step_id} of the sequence.")
         except Exception:
             pass
         
@@ -731,7 +832,7 @@ async def handle_media_inputs(client, message):
         target_step_id = user_states[user_id].get("step")
         
         try:
-            downloading_notification = await message.reply("Initiating media download and synchronization...")
+            downloading_notification = await message.reply("⏳ Initiating cloud synchronization for attached media payload...")
         except Exception:
             return
         
@@ -756,7 +857,7 @@ async def handle_media_inputs(client, message):
         )
         
         try:
-            await downloading_notification.edit_text(f"Media Upload Completed. Sequence Step {target_step_id} updated.")
+            await downloading_notification.edit_text(f"✅ Media payload successfully integrated into Step {target_step_id} of the sequence.")
         except MessageNotModified:
             pass
         
@@ -764,5 +865,5 @@ async def handle_media_inputs(client, message):
         await start(client, message)
 
 if __name__ == "__main__":
-    print("Multi-Device WA Protocol running...")
+    print("Initiating Multi-Device WA Server Node...")
     app.run()
