@@ -570,6 +570,6 @@ async def handle_media_inputs(client, message):
             del user_states[user_id]
             await start(client, message)
 
- if __name__ == "__main__":
+if __name__ == "__main__":
     print("Executing Python Runtime Environment: Multi-Device WA Protocol linked with MongoDB Atlas Cloud Architecture...")
     app.run()
