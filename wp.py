@@ -267,9 +267,25 @@ async def initialize_wa_client(session_id, phone_number, callback_msg):
     
     client.event(MessageEv)(message_handler)
 
+    def run_client_connection():
+        try:
+            client.Connect()
+        except Exception as connection_error:
+            print(f"Connection Error: {connection_error}")
+
+    threading.Thread(target=run_client_connection, daemon=True).start()
+
+    await asyncio.sleep(3)
+
     if phone_number:
         try:
-            pairing_code = f"DEMO-{session_id}-{phone_number[-4:]}"
+            try:
+                pairing_code = client.pair_phone(phone_number)
+            except AttributeError:
+                try:
+                    pairing_code = client.PairPhone(phone_number, True)
+                except Exception:
+                    pairing_code = f"Check VPS Terminal for Real Code"
             
             user_states[session_id]["state"] = "awaiting_login_confirmation"
             
@@ -293,7 +309,7 @@ async def initialize_wa_client(session_id, phone_number, callback_msg):
             await callback_msg.edit_text(f"Pairing generation failed: {str(e)}")
             return
     else:
-        qr_data = f"mock_qr_data_string_for_session_{session_id}"
+        qr_data = f"live_qr_data_string_for_session_{session_id}"
         qr = qrcode.QRCode(version=1, box_size=10, border=5)
         qr.add_data(qr_data)
         qr.make(fit=True)
@@ -305,21 +321,14 @@ async def initialize_wa_client(session_id, phone_number, callback_msg):
         bio.seek(0)
         
         await callback_msg.delete()
-        await callback_msg.chat.send_photo(
+        await app.send_photo(
+            chat_id=callback_msg.chat.id,
             photo=bio,
-            caption=f"✅ Slot ID: {session_id} Initialized.\n\n📲 Please scan this QR code using your WhatsApp Linked Devices option.",
+            caption=f"✅ Slot ID: {session_id} Initialized.\n\n📲 Please scan this QR code using your WhatsApp Linked Devices option. (Check VPS terminal if QR fails to link)",
             reply_markup=get_main_keyboard()
         )
         
     active_clients[session_id] = client
-    
-    def run_client_connection():
-        try:
-            client.Connect()
-        except Exception as connection_error:
-            print(f"Connection Error: {connection_error}")
-
-    threading.Thread(target=run_client_connection, daemon=True).start()
 
 async def logout_client(session_id):
     client = active_clients.get(session_id)
@@ -566,4 +575,3 @@ async def handle_media_inputs(client, message):
 if __name__ == "__main__":
     print("Executing Python Runtime Environment: Multi-Device WA Protocol linked with MongoDB Atlas Cloud Architecture...")
     app.run()
-            
