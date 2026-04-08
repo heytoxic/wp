@@ -110,7 +110,7 @@ def get_add_wa_keyboard():
             ],
             [
                 types.InlineKeyboardButton(
-                    "🔙 Back to Main Menu",
+                    "❌ Cancel",
                     callback_data="back_main"
                 )
             ]
@@ -263,17 +263,7 @@ async def initialize_wa_client(session_id, phone_number, callback_msg):
         except Exception as e:
             print(f"Handler Error: {e}")
 
-    client_options = {}
-    if phone_number is None:
-        client_options["use_qr_code_for_login"] = True
-    else:
-        client_options["use_qr_code_for_login"] = False
-
-    client = NewClient(
-        f"session_{session_id}.db",
-        None,
-        options=client_options
-    )
+    client = NewClient(f"session_{session_id}.db")
     
     client.event(MessageEv)(message_handler)
 
@@ -452,8 +442,11 @@ async def handle_callbacks(client, callback_query):
         target_session_id = callback_data_string.split("_")[2]
         await logout_client(target_session_id)
         updated_accounts_list = list_accounts_conceptual()
+        
+        await callback_query.answer(f"✅ Session {target_session_id} successfully terminated and removed.", show_alert=True)
+        
         await callback_query.message.edit_text(
-            f"Operation Successful: Securely logged out and permanently erased session data for slot {target_session_id}.",
+            f"Directory Updated:",
             reply_markup=get_accounts_keyboard(updated_accounts_list)
         )
 
@@ -573,3 +566,4 @@ async def handle_media_inputs(client, message):
 if __name__ == "__main__":
     print("Executing Python Runtime Environment: Multi-Device WA Protocol linked with MongoDB Atlas Cloud Architecture...")
     app.run()
+            
