@@ -15,8 +15,8 @@ from neonize.types import JID, Message
 # ==========================================
 API_ID = 21705136   # Replace with your API_ID
 API_HASH = "78730e89d196e160b0f1992018c6cb19" # Replace with your API_HASH
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"  # Replace with your Bot Token
-ADMIN_ID = 123456789             # Replace with your Telegram User ID
+BOT_TOKEN = "8644651500:AAGx-3CxjaWP8r6CA9vB7073VwFHQc9U3nI"  # Replace with your Bot Token
+ADMIN_ID = 8176628365             # Replace with your Telegram User ID
 
 MONGO_DB_URI = "mongodb+srv://Krishna:pss968048@cluster0.4rfuzro.mongodb.net/?retryWrites=true&w=majority"
 
