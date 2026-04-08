@@ -70,7 +70,6 @@ app = Client(
 
 user_states = {}
 active_clients = {}
-live_qr_strings = {}
 
 def get_main_keyboard():
     status_doc = settings_col.find_one({"key": "bot_status"})
@@ -282,51 +281,6 @@ async def verify_login_loop(client_instance, session_id, phone_number, user_id, 
         except Exception:
             pass
 
-async def render_qr_and_send(session_id, user_id, active_msg_id):
-    for _ in range(30):
-        await asyncio.sleep(1)
-        qr_string = live_qr_strings.get(session_id)
-        if qr_string:
-            qr = qrcode.QRCode(version=1, box_size=10, border=5)
-            qr.add_data(qr_string)
-            qr.make(fit=True)
-            img = qr.make_image(fill_color="black", back_color="white")
-            
-            bio = io.BytesIO()
-            bio.name = f'qr_{session_id}.png'
-            img.save(bio, 'PNG')
-            bio.seek(0)
-            
-            try:
-                await app.delete_messages(user_id, active_msg_id)
-            except Exception:
-                pass
-                
-            try:
-                sent_photo = await app.send_photo(
-                    chat_id=user_id,
-                    photo=bio,
-                    caption=f"✅ **Dynamic QR Generated**\n\nSlot ID: `{session_id}`\n\nPlease scan this QR code within 30 seconds using your WhatsApp Linked Devices option.",
-                    reply_markup=types.InlineKeyboardMarkup(
-                        [
-                            [
-                                types.InlineKeyboardButton(
-                                    "❌ Cancel Request",
-                                    callback_data="back_main"
-                                )
-                            ]
-                        ]
-                    )
-                )
-                
-                user_states[user_id]["active_msg_id"] = sent_photo.id
-                client_instance = active_clients.get(session_id)
-                if client_instance:
-                    asyncio.create_task(verify_login_loop(client_instance, session_id, None, user_id, sent_photo.id))
-            except Exception:
-                pass
-            break
-
 async def auto_responder_task(session_id, chat_jid_str, client):
     try:
         user_number = chat_jid_str.split('@')[0]
@@ -398,36 +352,32 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
     user_states[user_id]["session_id"] = session_id
     user_states[user_id]["phone_number"] = phone_number
     
-    def event_handler(client, event):
+    db_path = f"session_{session_id}.db"
+    client = NewClient(db_path)
+    
+    def message_handler(client_obj, message: MessageEv):
         try:
-            if isinstance(event, MessageEv):
-                msg_info = event.Info
-                msg_source = msg_info.MessageSource
-                if msg_source.IsFromMe:
-                    return
-                chat_jid = str(msg_source.Chat)
-                asyncio.run_coroutine_threadsafe(auto_responder_task(session_id, chat_jid, client), current_loop)
-            
-            elif isinstance(event, LoggedOutEv):
-                try:
-                    sessions_col.delete_one({"session_id": session_id})
-                    contacts_col.delete_many({"session_id": session_id})
-                    if session_id in active_clients:
-                        del active_clients[session_id]
-                except Exception:
-                    pass
-                    
-            elif hasattr(event, "QR"):
-                qr_string = getattr(event, "QR")
-                if qr_string:
-                    live_qr_strings[session_id] = qr_string
-                    
+            msg_info = message.Info
+            msg_source = msg_info.MessageSource
+            if msg_source.IsFromMe:
+                return
+            chat_jid = str(msg_source.Chat)
+            asyncio.run_coroutine_threadsafe(auto_responder_task(session_id, chat_jid, client_obj), current_loop)
         except Exception:
             pass
 
-    db_path = f"session_{session_id}.db"
-    client = NewClient(db_path)
-    client.add_event_handler(event_handler)
+    def logout_handler(client_obj, event: LoggedOutEv):
+        try:
+            sessions_col.delete_one({"session_id": session_id})
+            contacts_col.delete_many({"session_id": session_id})
+            if session_id in active_clients:
+                del active_clients[session_id]
+        except Exception:
+            pass
+
+    client.event(MessageEv)(message_handler)
+    client.event(LoggedOutEv)(logout_handler)
+
     active_clients[session_id] = client
 
     def run_client_connection():
@@ -438,7 +388,7 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
 
     threading.Thread(target=run_client_connection, daemon=True).start()
 
-    await asyncio.sleep(3)
+    await asyncio.sleep(4)
 
     cancel_keyboard = types.InlineKeyboardMarkup(
         [
@@ -454,10 +404,10 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
     if phone_number:
         try:
             try:
-                pairing_code = client.pair_phone(phone_number)
+                pairing_code = client.PairPhone(phone_number, True)
             except Exception:
                 try:
-                    pairing_code = client.PairPhone(phone_number, True)
+                    pairing_code = client.pair_phone(phone_number)
                 except Exception:
                     pairing_code = "UNAVAILABLE"
             
@@ -502,14 +452,14 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
     else:
         try:
             sent_msg = await callback_msg.edit_text(
-                "⏳ **Intercepting QR Code from WhatsApp Servers...**\nPlease wait up to 10 seconds.",
+                "⏳ **Processing QR Request...**\nCheck your VPS terminal for the live QR matrix.",
                 reply_markup=cancel_keyboard
             )
             user_states[user_id]["active_msg_id"] = sent_msg.id
+            
+            asyncio.create_task(verify_login_loop(client, session_id, None, user_id, sent_msg.id))
         except MessageNotModified:
             pass
-            
-        asyncio.create_task(render_qr_and_send(session_id, user_id, sent_msg.id))
 
 async def logout_client(session_id):
     client = active_clients.get(session_id)
@@ -537,10 +487,11 @@ def count_accounts():
     current_today = time.strftime('%Y-%m-%d')
     stats_data = stats_col.find_one({"date": current_today})
     
-    if stats_data:
-        total_msgs_sent = stats_data.get("total_msgs_today", 0)
-    else:
+    if not stats_data:
+        stats_col.insert_one({"date": current_today, "total_msgs_today": 0})
         total_msgs_sent = 0
+    else:
+        total_msgs_sent = stats_data.get("total_msgs_today", 0)
 
     for client_instance in active_clients.values():
         if client_instance:
