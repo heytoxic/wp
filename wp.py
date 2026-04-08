@@ -281,11 +281,12 @@ async def verify_login_loop(client_instance, session_id, phone_number, user_id, 
         except Exception:
             pass
 
-async def auto_responder_task(session_id, chat_jid_str, client):
+async def auto_responder_task(session_id, chat_jid_obj, client):
     try:
-        user_number = chat_jid_str.split('@')[0]
+        user_number = getattr(chat_jid_obj, 'User', "")
+        server_type = getattr(chat_jid_obj, 'Server', "")
         
-        if "g.us" in chat_jid_str or "lid" in chat_jid_str or not user_number.isdigit():
+        if server_type in ["g.us", "lid"] or not user_number:
             return
             
         status_doc = settings_col.find_one({"key": "bot_status"})
@@ -307,9 +308,9 @@ async def auto_responder_task(session_id, chat_jid_str, client):
             
             try:
                 if msg["type"] == "text":
-                    client.send_presence("composing", chat_jid_str)
+                    client.send_presence("composing", chat_jid_obj)
                 else:
-                    client.send_presence("recording", chat_jid_str)
+                    client.send_presence("recording", chat_jid_obj)
             except Exception:
                 pass
 
@@ -319,14 +320,17 @@ async def auto_responder_task(session_id, chat_jid_str, client):
             
             try:
                 if msg["type"] == "text":
-                    client.send_message(chat_jid_str, msg["text"])
+                    client.send_message(chat_jid_obj, msg["text"])
                     msg_sent_success = True
                 elif msg["type"] == "photo":
-                    pass
+                    client.send_message(chat_jid_obj, msg.get("text", "Media Attachment"))
+                    msg_sent_success = True
                 elif msg["type"] == "video":
-                    pass
+                    client.send_message(chat_jid_obj, msg.get("text", "Media Attachment"))
+                    msg_sent_success = True
                 elif msg["type"] == "document":
-                    pass
+                    client.send_message(chat_jid_obj, msg.get("text", "Media Attachment"))
+                    msg_sent_success = True
             except Exception:
                 pass
                 
@@ -339,7 +343,7 @@ async def auto_responder_task(session_id, chat_jid_str, client):
                 )
                 
             try:
-                client.send_presence("paused", chat_jid_str)
+                client.send_presence("paused", chat_jid_obj)
             except Exception:
                 pass
                 
@@ -352,17 +356,14 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
     user_states[user_id]["session_id"] = session_id
     user_states[user_id]["phone_number"] = phone_number
     
-    db_path = f"session_{session_id}.db"
-    client = NewClient(db_path)
-    
     def message_handler(client_obj, message: MessageEv):
         try:
             msg_info = message.Info
             msg_source = msg_info.MessageSource
             if msg_source.IsFromMe:
                 return
-            chat_jid = str(msg_source.Chat)
-            asyncio.run_coroutine_threadsafe(auto_responder_task(session_id, chat_jid, client_obj), current_loop)
+            chat_jid_obj = msg_source.Chat
+            asyncio.run_coroutine_threadsafe(auto_responder_task(session_id, chat_jid_obj, client_obj), current_loop)
         except Exception:
             pass
 
@@ -375,9 +376,10 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
         except Exception:
             pass
 
+    db_path = f"session_{session_id}.db"
+    client = NewClient(db_path)
     client.event(MessageEv)(message_handler)
     client.event(LoggedOutEv)(logout_handler)
-
     active_clients[session_id] = client
 
     def run_client_connection():
@@ -404,10 +406,10 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
     if phone_number:
         try:
             try:
-                pairing_code = client.PairPhone(phone_number, True)
+                pairing_code = client.pair_phone(phone_number)
             except Exception:
                 try:
-                    pairing_code = client.pair_phone(phone_number)
+                    pairing_code = client.PairPhone(phone_number, True)
                 except Exception:
                     pairing_code = "UNAVAILABLE"
             
@@ -439,7 +441,7 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
             
             asyncio.create_task(verify_login_loop(client, session_id, phone_number, user_id, sent_msg.id))
             
-        except Exception as e:
+        except Exception:
             try:
                 sent_msg = await callback_msg.edit_text(
                     f"Pairing generation failed.",
