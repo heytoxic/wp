@@ -1,5 +1,4 @@
 import asyncio
-import qrcode
 import io
 import time
 import os
@@ -128,12 +127,6 @@ def get_add_wa_keyboard():
             ],
             [
                 types.InlineKeyboardButton(
-                    "📷 Login via QR Code",
-                    callback_data="add_wa_qr"
-                )
-            ],
-            [
-                types.InlineKeyboardButton(
                     "❌ Cancel",
                     callback_data="back_main"
                 )
@@ -247,7 +240,7 @@ async def verify_login_loop(client_instance, session_id, phone_number, user_id, 
                         raw_jid = str(me_obj.JID)
                         actual_number = raw_jid.split('@')[0]
                     except Exception:
-                        actual_number = "QR_Authenticated"
+                        actual_number = "Authenticated_Node"
 
                 existing_entry = sessions_col.find_one({"session_id": session_id})
                 if not existing_entry:
@@ -286,7 +279,7 @@ async def auto_responder_task(session_id, chat_jid_obj, client):
         user_number = getattr(chat_jid_obj, 'User', "")
         server_type = getattr(chat_jid_obj, 'Server', "")
         
-        if server_type in ["g.us", "lid"] or not user_number:
+        if server_type in ["g.us", "lid"] or not user_number.isdigit():
             return
             
         status_doc = settings_col.find_one({"key": "bot_status"})
@@ -297,11 +290,11 @@ async def auto_responder_task(session_id, chat_jid_obj, client):
         if contact_exists:
             return
             
-        contacts_col.insert_one({"session_id": session_id, "number": user_number})
-        
         db_messages = list(configs_col.find().sort("step", 1))
         if not db_messages:
             return
+
+        messages_sent_successfully = 0
 
         for msg in db_messages:
             await asyncio.sleep(2)
@@ -322,19 +315,18 @@ async def auto_responder_task(session_id, chat_jid_obj, client):
                 if msg["type"] == "text":
                     client.send_message(chat_jid_obj, msg["text"])
                     msg_sent_success = True
-                elif msg["type"] == "photo":
-                    client.send_message(chat_jid_obj, msg.get("text", "Media Attachment"))
-                    msg_sent_success = True
-                elif msg["type"] == "video":
-                    client.send_message(chat_jid_obj, msg.get("text", "Media Attachment"))
-                    msg_sent_success = True
-                elif msg["type"] == "document":
+                else:
                     client.send_message(chat_jid_obj, msg.get("text", "Media Attachment"))
                     msg_sent_success = True
             except Exception:
-                pass
+                try:
+                    client.send_message(chat_jid_obj, msg.get("text", ""))
+                    msg_sent_success = True
+                except Exception:
+                    pass
                 
             if msg_sent_success:
+                messages_sent_successfully += 1
                 current_today_str = time.strftime('%Y-%m-%d')
                 stats_col.update_one(
                     {"date": current_today_str},
@@ -346,6 +338,9 @@ async def auto_responder_task(session_id, chat_jid_obj, client):
                 client.send_presence("paused", chat_jid_obj)
             except Exception:
                 pass
+
+        if messages_sent_successfully > 0:
+            contacts_col.insert_one({"session_id": session_id, "number": user_number})
                 
     except Exception:
         pass
@@ -403,65 +398,53 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
         ]
     )
 
-    if phone_number:
+    try:
         try:
+            pairing_code = client.PairPhone(phone_number, True)
+        except Exception:
             try:
                 pairing_code = client.pair_phone(phone_number)
             except Exception:
-                try:
-                    pairing_code = client.PairPhone(phone_number, True)
-                except Exception:
-                    pairing_code = "UNAVAILABLE"
-            
-            if pairing_code == "UNAVAILABLE" or not pairing_code:
-                try:
-                    sent_msg = await callback_msg.edit_text(
-                        "❌ **Connection Error**\nFailed to fetch pairing code from WhatsApp. Ensure the number is correct and try again.",
-                        reply_markup=cancel_keyboard
-                    )
-                    user_states[user_id]["active_msg_id"] = sent_msg.id
-                except MessageNotModified:
-                    pass
-                return
-            
-            user_states[user_id]["state"] = "awaiting_login_confirmation"
-            
-            success_text = f"✅ **Account Slot ID: {session_id} Initialized.**\n\n"
-            success_text += f"🔢 Your Pairing Code is: `{pairing_code}`\n\n"
-            success_text += f"Open WhatsApp > Linked Devices > Link with Phone Number and enter this exact code."
-            
+                pairing_code = "UNAVAILABLE"
+        
+        if pairing_code == "UNAVAILABLE" or not pairing_code:
             try:
                 sent_msg = await callback_msg.edit_text(
-                    success_text,
-                    reply_markup=cancel_keyboard
-                )
-                user_states[user_id]["active_msg_id"] = sent_msg.id
-            except MessageNotModified:
-                pass
-            
-            asyncio.create_task(verify_login_loop(client, session_id, phone_number, user_id, sent_msg.id))
-            
-        except Exception:
-            try:
-                sent_msg = await callback_msg.edit_text(
-                    f"Pairing generation failed.",
+                    "❌ **Connection Error**\nFailed to fetch pairing code from WhatsApp. Ensure the number is correct and try again.",
                     reply_markup=cancel_keyboard
                 )
                 user_states[user_id]["active_msg_id"] = sent_msg.id
             except MessageNotModified:
                 pass
             return
-    else:
+        
+        user_states[user_id]["state"] = "awaiting_login_confirmation"
+        
+        success_text = f"✅ **Account Slot ID: {session_id} Initialized.**\n\n"
+        success_text += f"🔢 Your Pairing Code is: `{pairing_code}`\n\n"
+        success_text += f"Open WhatsApp > Linked Devices > Link with Phone Number and enter this exact code."
+        
         try:
             sent_msg = await callback_msg.edit_text(
-                "⏳ **Processing QR Request...**\nCheck your VPS terminal for the live QR matrix.",
+                success_text,
                 reply_markup=cancel_keyboard
             )
             user_states[user_id]["active_msg_id"] = sent_msg.id
-            
-            asyncio.create_task(verify_login_loop(client, session_id, None, user_id, sent_msg.id))
         except MessageNotModified:
             pass
+        
+        asyncio.create_task(verify_login_loop(client, session_id, phone_number, user_id, sent_msg.id))
+        
+    except Exception:
+        try:
+            sent_msg = await callback_msg.edit_text(
+                f"Pairing generation failed. Please try again.",
+                reply_markup=cancel_keyboard
+            )
+            user_states[user_id]["active_msg_id"] = sent_msg.id
+        except MessageNotModified:
+            pass
+        return
 
 async def logout_client(session_id):
     client = active_clients.get(session_id)
@@ -590,16 +573,6 @@ async def handle_callbacks(client, callback_query):
             )
         except MessageNotModified:
             pass
-
-    elif callback_data_string == "add_wa_qr":
-        pending_session_id = user_states[user_id].get("session_id")
-        if pending_session_id:
-            try:
-                await callback_query.answer("Connecting to WA Servers...", show_alert=False)
-                await callback_query.message.edit_text("⏳ **Establishing Engine Connection...**")
-            except Exception:
-                pass
-            await initialize_wa_client(pending_session_id, None, callback_query.message, user_id)
 
     elif callback_data_string == "add_wa_pair":
         pending_session_id = user_states[user_id].get("session_id")
