@@ -121,19 +121,17 @@ def get_config_msgs_keyboard():
         [
             [
                 types.InlineKeyboardButton(
-                    "1️⃣ Configure 1st Auto-Reply",
+                    "1️⃣ Set 1st Msg",
                     callback_data="set_msg_1"
-                )
-            ],
-            [
+                ),
                 types.InlineKeyboardButton(
-                    "2️⃣ Configure 2nd Auto-Reply",
+                    "2️⃣ Set 2nd Msg",
                     callback_data="set_msg_2"
                 )
             ],
             [
                 types.InlineKeyboardButton(
-                    "3️⃣ Configure 3rd Auto-Reply",
+                    "3️⃣ Set 3rd Msg",
                     callback_data="set_msg_3"
                 )
             ],
@@ -237,7 +235,6 @@ async def auto_responder_task(client_id, chat_jid):
                 print(f"Sending Video to {chat_jid}")
             elif msg["type"] == "document":
                 print(f"Sending Document/APK to {chat_jid}")
-
         except Exception as send_err:
             print(f"Sending Error: {send_err}")
         finally:
@@ -257,14 +254,14 @@ async def initialize_wa_client(session_id, phone_number, callback_msg):
             chat_jid = str(message.Info.MessageSource.Chat)
             if "g.us" in chat_jid:
                 return
-            
             asyncio.create_task(auto_responder_task(session_id, chat_jid))
         except Exception as e:
             print(f"Handler Error: {e}")
 
-    client = NewClient(f"session_{session_id}.db")
-    
+    db_path = f"session_{session_id}.db"
+    client = NewClient(db_path)
     client.event(MessageEv)(message_handler)
+    active_clients[session_id] = client
 
     def run_client_connection():
         try:
@@ -280,11 +277,8 @@ async def initialize_wa_client(session_id, phone_number, callback_msg):
         try:
             try:
                 pairing_code = client.pair_phone(phone_number)
-            except AttributeError:
-                try:
-                    pairing_code = client.PairPhone(phone_number, True)
-                except Exception:
-                    pairing_code = f"Check VPS Terminal for Real Code"
+            except Exception:
+                pairing_code = "Check VPS Terminal for Real Code"
             
             user_states[session_id]["state"] = "awaiting_login_confirmation"
             
@@ -294,15 +288,7 @@ async def initialize_wa_client(session_id, phone_number, callback_msg):
             
             await callback_msg.edit_text(
                 success_text,
-                reply_markup=get_accounts_keyboard(
-                    [
-                        {
-                            "id": session_id,
-                            "number": phone_number,
-                            "is_active": False
-                        }
-                    ]
-                )
+                reply_markup=get_main_keyboard()
             )
         except Exception as e:
             await callback_msg.edit_text(f"Pairing generation failed: {str(e)}")
@@ -324,14 +310,12 @@ async def initialize_wa_client(session_id, phone_number, callback_msg):
         bio.seek(0)
         
         await callback_msg.delete()
-        await app.send_photo(
-            chat_id=callback_msg.chat.id,
+        
+        await callback_msg.reply_photo(
             photo=bio,
             caption=f"✅ Slot ID: {session_id} Initialized.\n\n📲 Please scan this QR code using your WhatsApp Linked Devices option. (Check VPS terminal if QR fails to link)",
             reply_markup=get_main_keyboard()
         )
-        
-    active_clients[session_id] = client
 
 async def logout_client(session_id):
     client = active_clients.get(session_id)
@@ -441,7 +425,8 @@ async def handle_callbacks(client, callback_query):
         if pending_session_id:
             user_states[user_id]["state"] = "awaiting_pair_number"
             await callback_query.message.edit_text(
-                "Please enter the target WhatsApp number including the international country code (e.g., +919876543210) to request a secure pairing code sequence:"
+                "Please enter the target WhatsApp number including the international country code (e.g., +919876543210) to request a secure pairing code sequence:",
+                reply_markup=get_add_wa_keyboard()
             )
 
     elif callback_data_string == "manage_accs":
@@ -542,23 +527,17 @@ async def handle_text_inputs(client, message):
 @app.on_message(filters.media & filters.private)
 async def handle_media_inputs(client, message):
     user_id = message.from_user.id
-    
     if user_id in user_states:
         current_user_state = user_states[user_id].get("state")
-        
         if current_user_state and current_user_state.startswith("awaiting_msg_"):
             target_step_id = user_states[user_id].get("step")
-            
             downloading_notification = await message.reply("Initiating media download protocol and cloud storage synchronization...")
-            
             media_type_string = "document"
             if message.photo:
                 media_type_string = "photo"
             elif message.video:
                 media_type_string = "video"
-                
             media_caption_text = message.caption or "Attached Media File"
-            
             configs_col.update_one(
                 {"step": target_step_id},
                 {
@@ -570,12 +549,11 @@ async def handle_media_inputs(client, message):
                 },
                 upsert=True
             )
-            
             await downloading_notification.edit_text(f"✅ Secure Media Upload Completed. Sequence Step {target_step_id} updated efficiently.")
-            
             del user_states[user_id]
             await start(client, message)
 
 if __name__ == "__main__":
     print("Executing Python Runtime Environment: Multi-Device WA Protocol linked with MongoDB Atlas Cloud Architecture...")
     app.run()
+            
