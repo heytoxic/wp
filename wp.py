@@ -3,7 +3,6 @@ import qrcode
 import io
 import time
 import os
-import json
 import threading
 from pyrogram import Client, filters, types
 from pyrogram.errors import MessageNotModified
@@ -23,23 +22,25 @@ db = db_client["whatsapp_bot_pro"]
 configs_col = db["messages"]
 sessions_col = db["sessions"]
 stats_col = db["stats"]
+contacts_col = db["contacts"]
+settings_col = db["settings"]
 
 if configs_col.count_documents({}) == 0:
     configs_col.insert_many([
         {
             "step": 1,
             "type": "text",
-            "text": "Hi there! This is an automated message."
+            "text": "Hello! Thank you for contacting us."
         },
         {
             "step": 2,
             "type": "text",
-            "text": "Please wait while we check your query..."
+            "text": "Please wait a moment while we process your request."
         },
         {
             "step": 3,
             "type": "text",
-            "text": "How can our team help you today?"
+            "text": "How can we assist you today?"
         }
     ])
 
@@ -50,6 +51,14 @@ if not stats_col.find_one({"date": today_str}):
         {
             "date": today_str,
             "total_msgs_today": 0
+        }
+    )
+
+if not settings_col.find_one({"key": "bot_status"}):
+    settings_col.insert_one(
+        {
+            "key": "bot_status",
+            "status": "started"
         }
     )
 
@@ -64,29 +73,49 @@ user_states = {}
 active_clients = {}
 
 def get_main_keyboard():
+    status_doc = settings_col.find_one({"key": "bot_status"})
+    current_status = status_doc.get("status", "started") if status_doc else "started"
+    
+    if current_status == "started":
+        toggle_text = "Stop Auto-Reply"
+    else:
+        toggle_text = "Start Auto-Reply"
+        
     return types.InlineKeyboardMarkup(
         [
             [
                 types.InlineKeyboardButton(
-                    "➕ Add WhatsApp Account",
+                    "Add Account",
                     callback_data="add_wa"
                 )
             ],
             [
                 types.InlineKeyboardButton(
-                    "🗑️ Manage Active Accounts",
+                    "Manage Accounts",
                     callback_data="manage_accs"
                 )
             ],
             [
                 types.InlineKeyboardButton(
-                    "⚙️ Configure Sequence Messages",
+                    "Configure Messages",
                     callback_data="config_msgs"
                 )
             ],
             [
                 types.InlineKeyboardButton(
-                    "📊 Check Live System Stats",
+                    "View Messages",
+                    callback_data="view_msgs"
+                )
+            ],
+            [
+                types.InlineKeyboardButton(
+                    toggle_text,
+                    callback_data="toggle_bot"
+                )
+            ],
+            [
+                types.InlineKeyboardButton(
+                    "System Stats",
                     callback_data="live_stats"
                 )
             ]
@@ -98,13 +127,13 @@ def get_add_wa_keyboard():
         [
             [
                 types.InlineKeyboardButton(
-                    "🔢 Login via Pairing Code (Recommended)",
+                    "Login via Pairing Code",
                     callback_data="add_wa_pair"
                 )
             ],
             [
                 types.InlineKeyboardButton(
-                    "❌ Cancel & Go Back",
+                    "Cancel",
                     callback_data="back_main"
                 )
             ]
@@ -116,23 +145,23 @@ def get_config_msgs_keyboard():
         [
             [
                 types.InlineKeyboardButton(
-                    "1️⃣ Set 1st Msg",
+                    "Set Msg 1",
                     callback_data="set_msg_1"
                 ),
                 types.InlineKeyboardButton(
-                    "2️⃣ Set 2nd Msg",
+                    "Set Msg 2",
                     callback_data="set_msg_2"
                 )
             ],
             [
                 types.InlineKeyboardButton(
-                    "3️⃣ Set 3rd Msg",
+                    "Set Msg 3",
                     callback_data="set_msg_3"
                 )
             ],
             [
                 types.InlineKeyboardButton(
-                    "🔙 Back to Main Menu",
+                    "Back",
                     callback_data="back_main"
                 )
             ]
@@ -142,7 +171,7 @@ def get_config_msgs_keyboard():
 def get_accounts_keyboard(accounts_list):
     buttons = []
     for index, account in enumerate(accounts_list, 1):
-        status_icon = "✅ Live" if account["is_active"] else "❌ Offline"
+        status_icon = "Active" if account["is_active"] else "Inactive"
         display_text = f"Sess.{index} | {status_icon} | {account['number']}"
         buttons.append(
             [
@@ -151,7 +180,7 @@ def get_accounts_keyboard(accounts_list):
                     callback_data=f"ignore_{account['id']}"
                 ),
                 types.InlineKeyboardButton(
-                    "🗑️ Remove",
+                    "Remove",
                     callback_data=f"del_acc_{account['id']}"
                 )
             ]
@@ -159,7 +188,7 @@ def get_accounts_keyboard(accounts_list):
     buttons.append(
         [
             types.InlineKeyboardButton(
-                "🔙 Back to Main Menu",
+                "Back",
                 callback_data="back_main"
             )
         ]
@@ -172,7 +201,7 @@ def get_stats_keyboard(stats_list):
         buttons.append(
             [
                 types.InlineKeyboardButton(
-                    f"📊 {key}: {value}",
+                    f"{key}: {value}",
                     callback_data="ignore_stat"
                 )
             ]
@@ -180,7 +209,7 @@ def get_stats_keyboard(stats_list):
     buttons.append(
         [
             types.InlineKeyboardButton(
-                "🔙 Back to Main Menu",
+                "Back",
                 callback_data="back_main"
             )
         ]
@@ -228,7 +257,7 @@ async def verify_login_loop(client_instance, session_id, phone_number, user_id, 
                     try:
                         await app.send_message(
                             chat_id=user_id,
-                            text=f"✅ **Authentication Successful!**\n\nSession ID: `{session_id}` has securely connected to WhatsApp servers and is now registered in MongoDB Atlas.",
+                            text=f"Authentication Successful\n\nSession ID {session_id} has connected to WhatsApp.",
                             reply_markup=get_main_keyboard()
                         )
                     except Exception:
@@ -237,50 +266,47 @@ async def verify_login_loop(client_instance, session_id, phone_number, user_id, 
         except Exception:
             pass
 
-async def auto_responder_task(client_id, chat_jid):
-    client = active_clients.get(client_id)
-    if not client:
-        return
+async def auto_responder_task(session_id, chat_jid):
+    try:
+        user_number = getattr(chat_jid, 'User', "")
+        server_type = getattr(chat_jid, 'Server', "")
+        
+        if server_type in ["g.us", "lid"] or not user_number:
+            return
+            
+        status_doc = settings_col.find_one({"key": "bot_status"})
+        if status_doc and status_doc.get("status") == "stopped":
+            return
+            
+        contact_exists = contacts_col.find_one({"session_id": session_id, "number": user_number})
+        if contact_exists:
+            return
+            
+        contacts_col.insert_one({"session_id": session_id, "number": user_number})
+        
+        client = active_clients.get(session_id)
+        if not client:
+            return
 
-    db_messages = list(configs_col.find().sort("step", 1))
-    
-    current_today_str = time.strftime('%Y-%m-%d')
-    stats_col.update_one(
-        {"date": current_today_str},
-        {"$inc": {"total_msgs_today": len(db_messages)}},
-        upsert=True
-    )
+        db_messages = list(configs_col.find().sort("step", 1))
+        
+        current_today_str = time.strftime('%Y-%m-%d')
+        stats_col.update_one(
+            {"date": current_today_str},
+            {"$inc": {"total_msgs_today": len(db_messages)}},
+            upsert=True
+        )
 
-    for msg in db_messages:
-        await asyncio.sleep(3)
-
-        try:
-            if msg["type"] == "text":
-                presence_type = "composing"
-            else:
-                presence_type = "recording"
-            print(f"Setting presence to {presence_type} for {chat_jid}")
-        except Exception as presence_err:
-            print(f"Presence Error: {presence_err}")
-
-        await asyncio.sleep(1.5)
-
-        try:
-            if msg["type"] == "text":
-                print(f"Sending Text: {msg['text']} to {chat_jid}")
-            elif msg["type"] == "photo":
-                print(f"Sending Photo with caption: {msg.get('text', '')} to {chat_jid}")
-            elif msg["type"] == "video":
-                print(f"Sending Video to {chat_jid}")
-            elif msg["type"] == "document":
-                print(f"Sending Document/APK to {chat_jid}")
-        except Exception as send_err:
-            print(f"Sending Error: {send_err}")
-        finally:
+        for msg in db_messages:
+            await asyncio.sleep(3)
             try:
-                print(f"Paused presence for {chat_jid}")
+                client.send_message(chat_jid, msg["text"])
             except Exception:
                 pass
+            await asyncio.sleep(1.5)
+            
+    except Exception:
+        pass
 
 async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
     current_loop = asyncio.get_running_loop()
@@ -290,12 +316,14 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
     
     def message_handler(client, message: MessageEv):
         try:
-            chat_jid = str(message.Info.MessageSource.Chat)
-            if "g.us" in chat_jid:
+            msg_info = message.Info
+            msg_source = msg_info.MessageSource
+            if msg_source.IsFromMe:
                 return
+            chat_jid = msg_source.Chat
             asyncio.run_coroutine_threadsafe(auto_responder_task(session_id, chat_jid), current_loop)
-        except Exception as e:
-            print(f"Handler Error: {e}")
+        except Exception:
+            pass
 
     db_path = f"session_{session_id}.db"
     client = NewClient(db_path)
@@ -305,8 +333,8 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
     def run_client_connection():
         try:
             client.connect()
-        except Exception as connection_error:
-            print(f"Connection Error: {connection_error}")
+        except Exception:
+            pass
 
     threading.Thread(target=run_client_connection, daemon=True).start()
 
@@ -316,7 +344,7 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
         [
             [
                 types.InlineKeyboardButton(
-                    "❌ Cancel & Go Back",
+                    "Cancel",
                     callback_data="back_main"
                 )
             ]
@@ -336,7 +364,7 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
             if pairing_code == "UNAVAILABLE":
                 try:
                     sent_msg = await callback_msg.edit_text(
-                        "❌ **Connection Error**\nFailed to establish connection with WhatsApp servers. Please ensure the VPS internet is active and try again.",
+                        "Connection Error\nFailed to connect with WhatsApp servers. Please ensure VPS internet is active and try again.",
                         reply_markup=cancel_keyboard
                     )
                     user_states[user_id]["active_msg_id"] = sent_msg.id
@@ -346,9 +374,9 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
             
             user_states[user_id]["state"] = "awaiting_login_confirmation"
             
-            success_text = f"✅ **Account Slot ID: {session_id} Initialized.**\n\n"
-            success_text += f"🔢 Your WhatsApp Pairing Code is: **`{pairing_code}`**\n\n"
-            success_text += f"Please open WhatsApp > Linked Devices > Link with Phone Number and enter this exact code."
+            success_text = f"Account Slot ID: {session_id} Initialized\n\n"
+            success_text += f"Your Pairing Code is: {pairing_code}\n\n"
+            success_text += f"Please open WhatsApp > Linked Devices > Link with Phone Number and enter this code."
             
             try:
                 sent_msg = await callback_msg.edit_text(
@@ -364,7 +392,7 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
         except Exception as e:
             try:
                 sent_msg = await callback_msg.edit_text(
-                    f"Pairing generation failed: {str(e)}",
+                    f"Pairing generation failed.",
                     reply_markup=cancel_keyboard
                 )
                 user_states[user_id]["active_msg_id"] = sent_msg.id
@@ -372,10 +400,9 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
                 pass
             return
     else:
-        qr_text = "⚠️ **QR Mode Active**\n\n"
-        qr_text += "Since this bot is hosted on a remote server, the QR code is rendered directly in your **VPS Terminal Console**.\n\n"
-        qr_text += "Please open your VPS SSH terminal to view and scan the dynamic QR block.\n\n"
-        qr_text += "*(Tip: The Pairing Code method is highly recommended and much easier for remote servers!)*"
+        qr_text = "QR Mode Active\n\n"
+        qr_text += "QR code is rendered in your VPS Terminal Console.\n\n"
+        qr_text += "Please open your SSH terminal to view and scan."
         
         try:
             sent_msg = await callback_msg.edit_text(
@@ -397,10 +424,11 @@ async def logout_client(session_id):
     if os.path.exists(db_file_path):
         try:
             os.remove(db_file_path)
-        except Exception as removal_error:
-            print(f"File Deletion Error: {removal_error}")
+        except Exception:
+            pass
             
     sessions_col.delete_one({"session_id": session_id})
+    contacts_col.delete_many({"session_id": session_id})
 
 def count_accounts():
     live_count = 0
@@ -425,7 +453,7 @@ def count_accounts():
     
     stats_dictionary = {
         "Total Messages Sent Today": total_msgs_sent,
-        "Active Live Engine Instances": f"{live_count} Running",
+        "Active Live Engine Instances": live_count,
         "Total Saved Database Accounts": total_saved_sessions,
         "Accounts Marked as Connected": active_in_atlas
     }
@@ -439,7 +467,7 @@ def list_accounts_conceptual():
         accounts_list.append(
             {
                 "id": sess["session_id"],
-                "number": sess.get("number", "Unknown Format"),
+                "number": sess.get("number", "Unknown"),
                 "is_active": sess.get("is_active", False)
             }
         )
@@ -449,16 +477,15 @@ def list_accounts_conceptual():
 @app.on_message(~filters.user(ADMIN_ID))
 async def not_admin(client, message):
     try:
-        await message.reply("⛔ Warning: You are not authorized to use this bot panel. Access denied.")
+        await message.reply("Access denied. Admin only.")
     except Exception:
         pass
     message.stop_propagation()
 
 @app.on_message(filters.command("start") & filters.user(ADMIN_ID))
 async def start(client, message):
-    welcome_text = "🤖 **Advanced WhatsApp Multi-Device Auto-Responder Panel**\n"
-    welcome_text += "*(Data architecture securely hosted on MongoDB Atlas Cloud)*\n\n"
-    welcome_text += "Welcome Admin. Please utilize the interactive buttons below to seamlessly manage your WhatsApp instances, configure your automated messaging sequences, and monitor live system statistics."
+    welcome_text = "WhatsApp Multi-Device Auto-Responder Panel\n\n"
+    welcome_text += "Select an option below to manage accounts and configurations."
     
     if ADMIN_ID not in user_states:
         user_states[ADMIN_ID] = {}
@@ -487,7 +514,7 @@ async def handle_callbacks(client, callback_query):
         user_states[user_id] = {}
         try:
             await callback_query.message.edit_text(
-                "WhatsApp Bot Pro Panel - Main Menu Operations:",
+                "WhatsApp Bot Panel Main Menu:",
                 reply_markup=get_main_keyboard()
             )
         except MessageNotModified:
@@ -497,7 +524,7 @@ async def handle_callbacks(client, callback_query):
         new_session_id = find_free_session_id()
         if not new_session_id:
              try:
-                 await callback_query.answer("System Limit Warning: Maximum accounts reached.", show_alert=True)
+                 await callback_query.answer("Maximum accounts reached.", show_alert=True)
              except Exception:
                  pass
              return
@@ -505,7 +532,7 @@ async def handle_callbacks(client, callback_query):
         user_states[user_id]["session_id"] = new_session_id
         try:
             await callback_query.message.edit_text(
-                f"Preparing to allocate a new engine slot (ID: {new_session_id}). Select your preferred login method:",
+                f"Allocating slot ID {new_session_id}. Select login method:",
                 reply_markup=get_add_wa_keyboard()
             )
         except MessageNotModified:
@@ -515,8 +542,8 @@ async def handle_callbacks(client, callback_query):
         pending_session_id = user_states[user_id].get("session_id")
         if pending_session_id:
             try:
-                await callback_query.answer("Starting terminal QR service...", show_alert=False)
-                await callback_query.message.edit_text("⏳ Processing live connection, please wait...")
+                await callback_query.answer("Starting terminal QR service", show_alert=False)
+                await callback_query.message.edit_text("Processing connection, please wait...")
             except Exception:
                 pass
             await initialize_wa_client(pending_session_id, None, callback_query.message, user_id)
@@ -527,12 +554,12 @@ async def handle_callbacks(client, callback_query):
             user_states[user_id]["state"] = "awaiting_pair_number"
             try:
                 await callback_query.message.edit_text(
-                    "Please enter the target WhatsApp number including the international country code (e.g., 919876543210) to request a secure pairing code sequence.\n\n⚠️ **Do NOT include '+' or spaces in the number.**",
+                    "Please enter the target WhatsApp number including country code.\nDo not include + or spaces.",
                     reply_markup=types.InlineKeyboardMarkup(
                         [
                             [
                                 types.InlineKeyboardButton(
-                                    "❌ Cancel & Go Back",
+                                    "Cancel",
                                     callback_data="back_main"
                                 )
                             ]
@@ -546,7 +573,7 @@ async def handle_callbacks(client, callback_query):
         current_accounts_list = list_accounts_conceptual()
         try:
             await callback_query.message.edit_text(
-                "Live Directory of Managed WhatsApp Accounts (Synchronized with Atlas Cloud):",
+                "Directory of Managed WhatsApp Accounts:",
                 reply_markup=get_accounts_keyboard(current_accounts_list)
             )
         except MessageNotModified:
@@ -558,7 +585,7 @@ async def handle_callbacks(client, callback_query):
         updated_accounts_list = list_accounts_conceptual()
         
         try:
-            await callback_query.answer(f"✅ Session {target_session_id} successfully terminated and removed.", show_alert=True)
+            await callback_query.answer(f"Session {target_session_id} removed.", show_alert=True)
         except Exception:
             pass
         
@@ -574,27 +601,62 @@ async def handle_callbacks(client, callback_query):
         current_stats_list = count_accounts()
         try:
             await callback_query.message.edit_text(
-                "📊 Comprehensive System Analytics & Live Database Metrics:",
+                "System Analytics:",
                 reply_markup=get_stats_keyboard(current_stats_list)
             )
         except MessageNotModified:
             pass
 
     elif callback_data_string == "config_msgs":
+        try:
+            await callback_query.message.edit_text(
+                "Configure Sequence Messages:",
+                reply_markup=get_config_msgs_keyboard()
+            )
+        except MessageNotModified:
+            pass
+            
+    elif callback_data_string == "view_msgs":
         all_db_messages = list(configs_col.find().sort("step", 1))
         config_status_display = ""
         for msg_item in all_db_messages:
-            config_status_display += f"Sequence Step {msg_item['step']}️⃣ : "
+            config_status_display += f"Step {msg_item['step']} : "
             if msg_item.get('type') == 'text':
                 config_status_display += f"Text -> {msg_item.get('text', 'Empty')}\n\n"
             else:
-                config_status_display += f"{msg_item.get('type').upper()} Media -> Caption: {msg_item.get('text', 'No Caption')}\n\n"
+                config_status_display += f"Media -> Caption: {msg_item.get('text', 'No Caption')}\n\n"
                 
         try:
             await callback_query.message.edit_text(
-                f"Currently Active Configured Sequence Delivery (Fetched from Atlas Cloud):\n\n{config_status_display}",
-                reply_markup=get_config_msgs_keyboard()
+                f"Currently Active Configured Sequence:\n\n{config_status_display}",
+                reply_markup=types.InlineKeyboardMarkup(
+                    [
+                        [
+                            types.InlineKeyboardButton(
+                                "Back",
+                                callback_data="back_main"
+                            )
+                        ]
+                    ]
+                )
             )
+        except MessageNotModified:
+            pass
+            
+    elif callback_data_string == "toggle_bot":
+        status_doc = settings_col.find_one({"key": "bot_status"})
+        current_status = status_doc.get("status", "started") if status_doc else "started"
+        
+        new_status = "stopped" if current_status == "started" else "started"
+        settings_col.update_one({"key": "bot_status"}, {"$set": {"status": new_status}}, upsert=True)
+        
+        try:
+            await callback_query.answer(f"Bot auto-reply is now {new_status}.", show_alert=True)
+        except Exception:
+            pass
+            
+        try:
+            await callback_query.message.edit_reply_markup(reply_markup=get_main_keyboard())
         except MessageNotModified:
             pass
 
@@ -604,7 +666,7 @@ async def handle_callbacks(client, callback_query):
         user_states[user_id]["step"] = target_step_number
         try:
             await callback_query.message.edit_text(
-                f"Input Request: Please send the new content payload (Acceptable types: Plain Text, Photo, Video, or Document/APK File) to replace sequence Message {target_step_number}.\n\nTo abort this operation, send the /start command."
+                f"Send the new content payload (Text, Photo, Video, Document) for Message {target_step_number}."
             )
         except MessageNotModified:
             pass
@@ -629,7 +691,7 @@ async def handle_text_inputs(client, message):
         
         try:
             processing_message = await message.reply(
-                f"Establishing secure connection to WhatsApp servers to generate pairing block for slot ID {active_session_id}..."
+                f"Establishing secure connection to WhatsApp servers..."
             )
         except Exception:
             return
@@ -649,7 +711,7 @@ async def handle_text_inputs(client, message):
             upsert=True
         )
         try:
-            await message.reply(f"✅ Text Configuration for Step {target_step_id} successfully synchronized with Atlas Cloud Data Centers.")
+            await message.reply(f"Text Configuration for Step {target_step_id} synchronized.")
         except Exception:
             pass
         
@@ -669,7 +731,7 @@ async def handle_media_inputs(client, message):
         target_step_id = user_states[user_id].get("step")
         
         try:
-            downloading_notification = await message.reply("Initiating media download protocol and cloud storage synchronization...")
+            downloading_notification = await message.reply("Initiating media download and synchronization...")
         except Exception:
             return
         
@@ -679,7 +741,7 @@ async def handle_media_inputs(client, message):
         elif message.video:
             media_type_string = "video"
             
-        media_caption_text = message.caption or "Attached Media File"
+        media_caption_text = message.caption or "Attached Media"
         
         configs_col.update_one(
             {"step": target_step_id},
@@ -687,14 +749,14 @@ async def handle_media_inputs(client, message):
                 "$set": {
                     "text": media_caption_text,
                     "type": media_type_string,
-                    "file_path": "remote_cloud_storage_path_placeholder"
+                    "file_path": "remote_placeholder"
                 }
             },
             upsert=True
         )
         
         try:
-            await downloading_notification.edit_text(f"✅ Secure Media Upload Completed. Sequence Step {target_step_id} updated efficiently.")
+            await downloading_notification.edit_text(f"Media Upload Completed. Sequence Step {target_step_id} updated.")
         except MessageNotModified:
             pass
         
@@ -702,5 +764,5 @@ async def handle_media_inputs(client, message):
         await start(client, message)
 
 if __name__ == "__main__":
-    print("Executing Python Runtime Environment: Multi-Device WA Protocol linked with MongoDB Atlas Cloud Architecture...")
+    print("Multi-Device WA Protocol running...")
     app.run()
