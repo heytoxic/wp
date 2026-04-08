@@ -193,36 +193,47 @@ def find_free_session_id():
             return str(i)
     return None
 
-async def verify_login_loop(session_id, phone_number, user_id, active_msg_id):
-    for _ in range(120):
+async def verify_login_loop(client_instance, session_id, phone_number, user_id, active_msg_id):
+    for _ in range(150):
         await asyncio.sleep(2)
         try:
-            db_path = f"session_{session_id}.db"
-            if os.path.exists(db_path):
-                file_size = os.path.getsize(db_path)
-                if file_size > 25000:
-                    existing_entry = sessions_col.find_one({"session_id": session_id})
-                    if not existing_entry:
-                        sessions_col.insert_one(
-                            {
-                                "session_id": session_id,
-                                "number": phone_number,
-                                "is_active": True
-                            }
+            is_logged = False
+            
+            if hasattr(client_instance, 'is_logged_in'):
+                val = getattr(client_instance, 'is_logged_in')
+                is_logged = val() if callable(val) else val
+            elif hasattr(client_instance, 'IsLoggedIn'):
+                val = getattr(client_instance, 'IsLoggedIn')
+                is_logged = val() if callable(val) else val
+            else:
+                db_path = f"session_{session_id}.db"
+                if os.path.exists(db_path):
+                    if os.path.getsize(db_path) > 90000:
+                        is_logged = True
+
+            if is_logged:
+                existing_entry = sessions_col.find_one({"session_id": session_id})
+                if not existing_entry:
+                    sessions_col.insert_one(
+                        {
+                            "session_id": session_id,
+                            "number": phone_number or "QR_Linked",
+                            "is_active": True
+                        }
+                    )
+                    try:
+                        await app.delete_messages(user_id, active_msg_id)
+                    except Exception:
+                        pass
+                    try:
+                        await app.send_message(
+                            chat_id=user_id,
+                            text=f"✅ **Authentication Successful!**\n\nSession ID: `{session_id}` has securely connected to WhatsApp servers and is now registered in MongoDB Atlas.",
+                            reply_markup=get_main_keyboard()
                         )
-                        try:
-                            await app.delete_messages(user_id, active_msg_id)
-                        except Exception:
-                            pass
-                        try:
-                            await app.send_message(
-                                chat_id=user_id,
-                                text=f"✅ **Authentication Successful!**\n\nSession ID: `{session_id}` has securely connected to WhatsApp servers and is now registered in MongoDB Atlas.",
-                                reply_markup=get_main_keyboard()
-                            )
-                        except Exception:
-                            pass
-                    break
+                    except Exception:
+                        pass
+                break
         except Exception:
             pass
 
@@ -312,53 +323,70 @@ async def initialize_wa_client(session_id, phone_number, callback_msg, user_id):
         ]
     )
 
-    try:
+    if phone_number:
         try:
-            pairing_code = client.PairPhone(phone_number, True)
-        except Exception:
             try:
-                pairing_code = client.pair_phone(phone_number)
+                pairing_code = client.PairPhone(phone_number, True)
             except Exception:
-                pairing_code = "UNAVAILABLE"
-        
-        if pairing_code == "UNAVAILABLE":
+                try:
+                    pairing_code = client.pair_phone(phone_number)
+                except Exception:
+                    pairing_code = "UNAVAILABLE"
+            
+            if pairing_code == "UNAVAILABLE":
+                try:
+                    sent_msg = await callback_msg.edit_text(
+                        "❌ **Connection Error**\nFailed to establish connection with WhatsApp servers. Please ensure the VPS internet is active and try again.",
+                        reply_markup=cancel_keyboard
+                    )
+                    user_states[user_id]["active_msg_id"] = sent_msg.id
+                except MessageNotModified:
+                    pass
+                return
+            
+            user_states[user_id]["state"] = "awaiting_login_confirmation"
+            
+            success_text = f"✅ **Account Slot ID: {session_id} Initialized.**\n\n"
+            success_text += f"🔢 Your WhatsApp Pairing Code is: **`{pairing_code}`**\n\n"
+            success_text += f"Please open WhatsApp > Linked Devices > Link with Phone Number and enter this exact code."
+            
             try:
                 sent_msg = await callback_msg.edit_text(
-                    "❌ **Connection Timeout Error**\nFailed to establish connection with WhatsApp servers. Please ensure the VPS internet is active and try again.",
+                    success_text,
+                    reply_markup=cancel_keyboard
+                )
+                user_states[user_id]["active_msg_id"] = sent_msg.id
+            except MessageNotModified:
+                pass
+            
+            asyncio.create_task(verify_login_loop(client, session_id, phone_number, user_id, sent_msg.id))
+            
+        except Exception as e:
+            try:
+                sent_msg = await callback_msg.edit_text(
+                    f"Pairing generation failed: {str(e)}",
                     reply_markup=cancel_keyboard
                 )
                 user_states[user_id]["active_msg_id"] = sent_msg.id
             except MessageNotModified:
                 pass
             return
-        
-        user_states[user_id]["state"] = "awaiting_login_confirmation"
-        
-        success_text = f"✅ **Account Slot ID: {session_id} Initialized.**\n\n"
-        success_text += f"🔢 Your WhatsApp Pairing Code is: **`{pairing_code}`**\n\n"
-        success_text += f"Please open WhatsApp > Linked Devices > Link with Phone Number and enter this exact code."
+    else:
+        qr_text = "⚠️ **QR Mode Active**\n\n"
+        qr_text += "Since this bot is hosted on a remote server, the QR code is rendered directly in your **VPS Terminal Console**.\n\n"
+        qr_text += "Please open your VPS SSH terminal to view and scan the dynamic QR block.\n\n"
+        qr_text += "*(Tip: The Pairing Code method is highly recommended and much easier for remote servers!)*"
         
         try:
             sent_msg = await callback_msg.edit_text(
-                success_text,
+                qr_text,
                 reply_markup=cancel_keyboard
             )
             user_states[user_id]["active_msg_id"] = sent_msg.id
         except MessageNotModified:
             pass
-        
-        asyncio.create_task(verify_login_loop(session_id, phone_number, user_id, sent_msg.id))
-        
-    except Exception as e:
-        try:
-            sent_msg = await callback_msg.edit_text(
-                f"Pairing generation failed: {str(e)}",
-                reply_markup=cancel_keyboard
-            )
-            user_states[user_id]["active_msg_id"] = sent_msg.id
-        except MessageNotModified:
-            pass
-        return
+            
+        asyncio.create_task(verify_login_loop(client, session_id, None, user_id, sent_msg.id))
 
 async def logout_client(session_id):
     client = active_clients.get(session_id)
@@ -482,6 +510,16 @@ async def handle_callbacks(client, callback_query):
             )
         except MessageNotModified:
             pass
+
+    elif callback_data_string == "add_wa_qr":
+        pending_session_id = user_states[user_id].get("session_id")
+        if pending_session_id:
+            try:
+                await callback_query.answer("Starting terminal QR service...", show_alert=False)
+                await callback_query.message.edit_text("⏳ Processing live connection, please wait...")
+            except Exception:
+                pass
+            await initialize_wa_client(pending_session_id, None, callback_query.message, user_id)
 
     elif callback_data_string == "add_wa_pair":
         pending_session_id = user_states[user_id].get("session_id")
