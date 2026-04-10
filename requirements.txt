@@ -1,6 +1,6 @@
 pyrogram
 tgcrypto
 pymongo
-neonize
+neonize==0.1.14
 python-magic
-protobuf==5.26.1
+protobuf>=4.25.1,<5.0.0
