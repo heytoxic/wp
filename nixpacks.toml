@@ -1,3 +1,10 @@
-[phases.setup]
-nixPkgs = ["...", "libmagic"]
+[variables]
+NIXPACKS_PYTHON_VERSION = "3.10"
+PIP_NO_CACHE_DIR = "1"
+PYTHONUNBUFFERED = "1"
 
+[phases.setup]
+nixPkgs = ["python310", "gcc", "pkg-config", "openssl", "libmagic"]
+
+[phases.install]
+cmds = ["pip install --no-cache-dir -r requirements.txt"]
