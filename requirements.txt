@@ -3,4 +3,4 @@ tgcrypto
 pymongo
 neonize
 protobuf==4.25.3
-
+python-magic
